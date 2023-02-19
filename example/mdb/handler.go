@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"runtime"
+	"strconv"
 	"sync"
 
 	"github.com/tidwall/redcon"
@@ -184,6 +186,78 @@ func (h *Handler) delete(conn redcon.Conn, cmd redcon.Command) {
 			conn.WriteInt(0)
 		} else {
 			conn.WriteInt(1)
+		}
+		return err
+	})
+}
+
+func (h *Handler) info(conn redcon.Conn, cmd redcon.Command) {
+	_ = h.view(func(txn *lmdb.Txn) error {
+		stat, err := txn.Stat(h.dbi)
+		if err == nil {
+			// Note: only the keyspace section has been implemented (for count)
+			text := "# Keyspace\r\n"
+			text += fmt.Sprintf("db0:keys=%d,expires=%d\r\n", stat.Entries, 0)
+			conn.WriteBulkString(text)
+		}
+		return err
+	})
+}
+
+func (h *Handler) scan(conn redcon.Conn, cmd redcon.Command) {
+	if len(cmd.Args) <  2 {
+		conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+		return
+	}
+
+	count := 10
+	if len(cmd.Args) > 3 && string(cmd.Args[2]) == "COUNT" {
+		number, err := strconv.Atoi(string(cmd.Args[3]))
+		if err != nil {
+			return
+		}
+		count = number
+	}
+
+	_ = h.view(func(txn *lmdb.Txn) error {
+		cur, err := txn.OpenCursor(h.dbi)
+		if err != nil {
+			return err
+		}
+		defer cur.Close()
+
+		idx, err := strconv.Atoi(string(cmd.Args[1]))
+		if err != nil {
+			return err
+		}
+		for i := 0; i < idx; i++ {
+			_, _, err := cur.Get(nil, nil, lmdb.Next)
+			if lmdb.IsNotFound(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		}
+
+		keys := [][]byte{}
+		for i := 0; i < count; i++ {
+			key, _, err := cur.Get(nil, nil, lmdb.Next)
+			if lmdb.IsNotFound(err) {
+				idx = 0
+				break
+			}
+			if err != nil {
+				return err
+			}
+			keys = append(keys, key)
+			idx += 1
+		}
+		conn.WriteArray(2)
+		conn.WriteInt(idx)
+		conn.WriteArray(len(keys))
+		for _, key := range keys {
+			conn.WriteBulk(key)
 		}
 		return err
 	})
